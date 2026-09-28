@@ -1,0 +1,49 @@
+# Prism ML fork の llama.cpp（CUDA）を組み込み、RunPod Serverless のワーカーにする。
+# モデル本体はネットワークボリューム (/runpod-volume/models) に置き、初回だけ
+# Hugging Face から取得して以降はそこから読み込む。
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS build
+
+# PTQ1_0 / PQ2_0（Prism 独自 ternary 型）は本家 Prism フォークにしかない。
+# モデルカードが検証済みとしているリビジョンに固定する。
+ARG LLAMA_REPO=https://github.com/PrismML-Eng/llama.cpp.git
+ARG LLAMA_REF=9a9394a895b96003ca842a6041cb28ac49a108f7
+# H100/H200 (90), B200 (100), RTX PRO 6000 / B300 (120) まで対応。
+# 古い GPU (75/80/86/89) も含めるのでどのホストでも動く。
+ARG CUDA_ARCHS="75;80;86;89;90;100;120"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git cmake ninja-build g++ libgomp1 ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN git clone "$LLAMA_REPO" /src/llama.cpp \
+ && git -C /src/llama.cpp checkout "$LLAMA_REF"
+
+# GGML_NATIVE=OFF: GitHub のランナー CPU 向けに最適化させず、どのホストでも動くようにする。
+RUN cmake -S /src/llama.cpp -B /src/llama.cpp/build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DGGML_CUDA=ON \
+      -DGGML_NATIVE=OFF \
+      -DLLAMA_CURL=OFF \
+      -DLLAMA_BUILD_TESTS=OFF \
+      -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCHS" \
+ && ninja -C /src/llama.cpp/build llama-server
+
+FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    LLAMA_SERVER=/opt/llama/bin/llama-server
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip libgomp1 ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# 共有ライブラリ (libggml*.so, libllama*.so) ごとコピーする。
+COPY --from=build /src/llama.cpp/build/bin/ /opt/llama/bin/
+
+RUN pip3 install --no-cache-dir runpod huggingface_hub hf_transfer
+
+COPY handler.py /opt/handler.py
+WORKDIR /opt
+CMD ["python3", "-u", "/opt/handler.py"]
