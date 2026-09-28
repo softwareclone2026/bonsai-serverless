@@ -3,9 +3,13 @@
 
 初回リクエストでモデルをネットワークボリュームへ取得し (2回目以降は再利用)、
 llama-server を起動して HTTP で受け取ったジョブを /v1/chat/completions へ流す。
+モデルの取得は aria2c の並列ダウンロード (既定 16 接続、途中再開あり) で行い、
+aria2c が無い環境では huggingface_hub に切り替える。
 """
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -32,6 +36,16 @@ else:
     print(f"[worker] 警告: {VOLUME_DIR} がありません。{MODEL_DIR} を使います"
           " (毎回ダウンロードが走ります)", flush=True)
 
+# 取得方法: 既定は aria2c の並列ダウンロード。無い環境では huggingface_hub を使う。
+MODEL_REVISION = os.environ.get("MODEL_REVISION", "main")
+MODEL_FILES = [name for name in re.split(r"[,\s]+", os.environ.get("MODEL_FILES", "")) if name]
+MODEL_FILES = MODEL_FILES or [MODEL_FILE]
+DOWNLOAD_CONNECTIONS = max(1, int(os.environ.get("DOWNLOAD_CONNECTIONS", "16") or 16))
+DOWNLOAD_JOBS = max(1, int(os.environ.get("DOWNLOAD_JOBS", "4") or 4))
+DOWNLOAD_BACKEND = os.environ.get("DOWNLOAD_BACKEND", "auto").strip().lower()
+MIN_MODEL_BYTES = int(os.environ.get("MODEL_MIN_BYTES", "1000000000") or 0)
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+
 MODEL_PATH = os.path.join(MODEL_DIR, MODEL_FILE)
 LLAMA_SERVER = os.environ.get("LLAMA_SERVER", "/opt/llama/bin/llama-server")
 PORT = int(os.environ.get("WORKER_PORT", "8080"))
@@ -57,20 +71,112 @@ def log(message: str) -> None:
 # モデルの準備と llama-server の起動
 # --------------------------------------------------------------------------- #
 def model_is_ready() -> bool:
-    return os.path.isfile(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 1_000_000_000
+    """必要なファイルがそろっているか。途中の .part は完了とみなさない。"""
+    for index, name in enumerate(MODEL_FILES):
+        path = os.path.join(MODEL_DIR, name)
+        if not os.path.isfile(path):
+            return False
+        size = os.path.getsize(path)
+        # 分割ファイルは先頭だけ下限を課す (続きは小さくてもよい)。
+        if size <= 0 or (index == 0 and size < MIN_MODEL_BYTES):
+            return False
+    return True
+
+
+def missing_files() -> list:
+    todo = []
+    for index, name in enumerate(MODEL_FILES):
+        path = os.path.join(MODEL_DIR, name)
+        if not os.path.isfile(path):
+            todo.append(name)
+            continue
+        size = os.path.getsize(path)
+        if size <= 0 or (index == 0 and size < MIN_MODEL_BYTES):
+            todo.append(name)
+    return todo
+
+
+def file_url(name: str) -> str:
+    override = os.environ.get("MODEL_URL")
+    if override and len(MODEL_FILES) == 1:
+        return override
+    from huggingface_hub import hf_hub_url
+
+    return hf_hub_url(repo_id=MODEL_REPO, filename=name, revision=MODEL_REVISION)
+
+
+def finalize(files) -> None:
+    """aria2c が残した .part を本体の名前へ移す。"""
+    for name in files:
+        part = os.path.join(MODEL_DIR, name) + ".part"
+        dest = os.path.join(MODEL_DIR, name)
+        if os.path.isfile(part):
+            os.replace(part, dest)
+
+
+def aria2_download(files) -> None:
+    """aria2c で取得する。1 ファイルは複数接続、複数ファイルは並列に落とす。"""
+    jobs = max(1, min(len(files), DOWNLOAD_JOBS))
+    per_file = max(1, DOWNLOAD_CONNECTIONS // jobs) if jobs > 1 else DOWNLOAD_CONNECTIONS
+    listing = []
+    for name in files:
+        dest = os.path.join(MODEL_DIR, name)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        part = dest + ".part"
+        listing += [file_url(name),
+                    "  dir=" + os.path.dirname(part),
+                    "  out=" + os.path.basename(part)]
+    command = [
+        "aria2c",
+        "--continue=true", "--auto-file-renaming=false", "--allow-overwrite=true",
+        "--file-allocation=none",
+        "-x" + str(per_file), "-s" + str(per_file), "-k1M", "-j" + str(jobs),
+        "--max-tries=10", "--retry-wait=5", "--connect-timeout=20", "--timeout=60",
+        "--summary-interval=15", "--console-log-level=warn", "--show-console-readout=false",
+        "--input-file=-",
+    ]
+    if HF_TOKEN:
+        command.append("--header=Authorization: Bearer " + HF_TOKEN)
+    log(f"aria2c 並列取得: {len(files)} ファイル / ファイルあたり {per_file} 接続")
+    result = subprocess.run(command, input="\n".join(listing) + "\n", text=True,
+                            stdout=sys.stdout, stderr=subprocess.STDOUT)
+    if result.returncode != 0:
+        raise RuntimeError(f"aria2c が終了コード {result.returncode} で失敗しました")
+
+
+def hf_download(files) -> None:
+    from huggingface_hub import hf_hub_download
+
+    for name in files:
+        hf_hub_download(repo_id=MODEL_REPO, filename=name, revision=MODEL_REVISION,
+                        local_dir=MODEL_DIR, token=HF_TOKEN or None)
 
 
 def ensure_model() -> None:
     if model_is_ready():
-        log(f"モデルは取得済み: {MODEL_PATH} "
-            f"({os.path.getsize(MODEL_PATH) / 1e9:.2f} GB)")
+        total = sum(os.path.getsize(os.path.join(MODEL_DIR, name)) for name in MODEL_FILES)
+        log(f"モデルは取得済み: {MODEL_DIR} ({total / 1e9:.2f} GB)")
         return
     os.makedirs(MODEL_DIR, exist_ok=True)
-    log(f"Hugging Face から取得: {MODEL_REPO} / {MODEL_FILE}")
+    todo = missing_files()
+    log(f"Hugging Face から取得: {MODEL_REPO} / {', '.join(todo)}")
     started = time.time()
-    from huggingface_hub import hf_hub_download
-
-    hf_hub_download(repo_id=MODEL_REPO, filename=MODEL_FILE, local_dir=MODEL_DIR)
+    use_aria2 = DOWNLOAD_BACKEND in ("auto", "aria2", "aria2c") and shutil.which("aria2c")
+    if use_aria2:
+        try:
+            aria2_download(todo)
+            finalize(todo)
+        except Exception as error:
+            log(f"aria2c を続けられません ({error})。huggingface_hub で取り直します")
+            hf_download(todo)
+            finalize(todo)
+    else:
+        if DOWNLOAD_BACKEND in ("aria2", "aria2c"):
+            log("aria2c が見つかりません。huggingface_hub を使います")
+        hf_download(todo)
+        finalize(todo)
+    if not model_is_ready():
+        raise RuntimeError(f"モデルを取得できませんでした: {', '.join(todo)}")
     log(f"取得完了 ({time.time() - started:.1f} 秒)")
 
 

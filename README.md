@@ -24,6 +24,27 @@ llama-server を起動して推論を中継する。
 | `GPU_LAYERS` | `99` | GPU に載せる層数 |
 | `LLAMA_EXTRA_ARGS` | `--jinja --reasoning on --reasoning-effort medium --temp 1.0 --top-p 0.95 --top-k 20` | 追加起動引数 |
 | `MAX_TOKENS` | `512` | 既定の最大生成トークン数 |
+| `MODEL_REVISION` | `main` | 取得するリビジョン |
+| `MODEL_FILES` | (空) | 追加で取得するファイル。分割 GGUF をカンマ区切りで並べる |
+| `DOWNLOAD_CONNECTIONS` | `16` | 1 ファイルあたりの並列接続数 |
+| `DOWNLOAD_JOBS` | `4` | 複数ファイルを同時に落とす本数 |
+| `DOWNLOAD_BACKEND` | `auto` | `auto` / `aria2` / `hf` |
+| `MODEL_MIN_BYTES` | `1000000000` | 先頭ファイルを取得済みとみなす最小サイズ |
+
+## モデル取得の高速化
+
+初回リクエスト時のモデル取得は `aria2c` で行う。1 ファイルを既定 16 接続で分割受信し、
+途中で切れても `.part` から再開する。完了したファイルだけを本体名へ移すため、
+途中のファイルを取得済みと誤認しない。
+
+`aria2c` が無い・失敗した場合は `huggingface_hub` に自動で切り替える。このとき
+`hf_transfer` / `hf_xet` が有効ならそちらの高速転送を使う。分割 GGUF のように
+複数ファイルを取る場合は `MODEL_FILES` に列挙すると `DOWNLOAD_JOBS` 本まで並列に落とす。
+
+```sh
+# 例: 並列 24 接続にする
+DOWNLOAD_CONNECTIONS=24
+```
 
 ## llama.cpp の入手方法
 

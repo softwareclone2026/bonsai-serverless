@@ -30,17 +30,18 @@ FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HF_XET_HIGH_PERFORMANCE=1 \
     LLAMA_SERVER=/opt/llama/llama-server \
     LD_LIBRARY_PATH=/opt/llama
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 python3-pip libgomp1 ca-certificates \
+      python3 python3-pip libgomp1 ca-certificates aria2 \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /opt/llama/ /opt/llama/
 
-RUN pip3 install --no-cache-dir runpod huggingface_hub hf_transfer
+RUN pip3 install --no-cache-dir runpod huggingface_hub hf_transfer hf_xet
 
 COPY handler.py /opt/handler.py
 WORKDIR /opt
