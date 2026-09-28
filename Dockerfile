@@ -1,48 +1,44 @@
-# Prism ML fork の llama.cpp（CUDA）を組み込み、RunPod Serverless のワーカーにする。
+# Prism ML fork の llama.cpp (CUDA) を組み込み、RunPod Serverless のワーカーにする。
 # モデル本体はネットワークボリューム (/runpod-volume/models) に置き、初回だけ
 # Hugging Face から取得して以降はそこから読み込む。
-FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS build
+#
+# llama.cpp は自前ビルドせず、Prism フォークの公式リリースバイナリを使う。
+# 自前ビルドは 7 アーキテクチャ分を nvcc で焼くため 80 分以上かかり、しかも
+# リンク時に libcuda.so.1 を解決できず失敗する (詳細は Dockerfile.build)。
+# リリース版は ubuntu-22.04 + CUDA 12.8 でビルドされており、実行イメージと
+# 同じ glibc なのでそのまま動く。
+FROM debian:12-slim AS fetch
 
-# PTQ1_0 / PQ2_0（Prism 独自 ternary 型）は本家 Prism フォークにしかない。
-# モデルカードが検証済みとしているリビジョンに固定する。
-ARG LLAMA_REPO=https://github.com/PrismML-Eng/llama.cpp.git
-ARG LLAMA_REF=9a9394a895b96003ca842a6041cb28ac49a108f7
-# H100/H200 (90), B200 (100), RTX PRO 6000 / B300 (120) まで対応。
-# 古い GPU (75/80/86/89) も含めるのでどのホストでも動く。
-ARG CUDA_ARCHS="75;80;86;89;90;100;120"
+# モデルカードが検証済みとしているリビジョンのリリースに固定する。
+ARG LLAMA_TAG=prism-b10709-9a9394a
+ARG LLAMA_TARBALL_SHA256=8aec67eb023b251712c7e6490f367b5671bf587eced1436a9b85f4a90c3b7d3d
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      git cmake ninja-build g++ libgomp1 ca-certificates \
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
-RUN git clone "$LLAMA_REPO" /src/llama.cpp \
- && git -C /src/llama.cpp checkout "$LLAMA_REF"
-
-# GGML_NATIVE=OFF: GitHub のランナー CPU 向けに最適化させず、どのホストでも動くようにする。
-RUN cmake -S /src/llama.cpp -B /src/llama.cpp/build -G Ninja \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DGGML_CUDA=ON \
-      -DGGML_NATIVE=OFF \
-      -DLLAMA_CURL=OFF \
-      -DLLAMA_BUILD_TESTS=OFF \
-      -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCHS" \
- && ninja -C /src/llama.cpp/build llama-server
+# 同梱の共有ライブラリは RUNPATH=$ORIGIN なので、展開先にまとめて置けば解決できる。
+RUN curl -fsSL -o /tmp/llama.tar.gz \
+      "https://github.com/PrismML-Eng/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-linux-cuda-12.8-x64.tar.gz" \
+ && echo "${LLAMA_TARBALL_SHA256}  /tmp/llama.tar.gz" | sha256sum -c - \
+ && mkdir -p /opt/llama \
+ && tar -xzf /tmp/llama.tar.gz -C /opt/llama --strip-components=1
 
 FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
 
+# LD_LIBRARY_PATH は念のため。同梱ライブラリは RUNPATH=$ORIGIN で解決される。
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
-    LLAMA_SERVER=/opt/llama/bin/llama-server \
-    # CMake が埋め込む RPATH はビルド時の絶対パスのため、コピー先を明示する。
-    LD_LIBRARY_PATH=/opt/llama/bin
+    LLAMA_SERVER=/opt/llama/llama-server \
+    LD_LIBRARY_PATH=/opt/llama
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
       python3 python3-pip libgomp1 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# 共有ライブラリ (libggml*.so, libllama*.so) ごとコピーする。
-COPY --from=build /src/llama.cpp/build/bin/ /opt/llama/bin/
+COPY --from=fetch /opt/llama/ /opt/llama/
 
 RUN pip3 install --no-cache-dir runpod huggingface_hub hf_transfer
 
