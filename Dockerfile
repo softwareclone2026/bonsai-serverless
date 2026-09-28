@@ -33,7 +33,9 @@ FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
-    LLAMA_SERVER=/opt/llama/bin/llama-server
+    LLAMA_SERVER=/opt/llama/bin/llama-server \
+    # CMake が埋め込む RPATH はビルド時の絶対パスのため、コピー先を明示する。
+    LD_LIBRARY_PATH=/opt/llama/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip libgomp1 ca-certificates \
