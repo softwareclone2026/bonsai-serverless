@@ -41,18 +41,19 @@ FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HF_XET_HIGH_PERFORMANCE=1 \
     LLAMA_SERVER=/opt/llama/bin/llama-server \
     # CMake が埋め込む RPATH はビルド時の絶対パスのため、コピー先を明示する。
     LD_LIBRARY_PATH=/opt/llama/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-pip libgomp1 ca-certificates \
+      python3 python3-pip libgomp1 ca-certificates aria2 \
  && rm -rf /var/lib/apt/lists/*
 
 # 共有ライブラリ (libggml*.so, libllama*.so) ごとコピーする。
 COPY --from=build /src/llama.cpp/build/bin/ /opt/llama/bin/
 
-RUN pip3 install --no-cache-dir runpod huggingface_hub hf_transfer
+RUN pip3 install --no-cache-dir runpod huggingface_hub hf_transfer hf_xet
 
 COPY handler.py /opt/handler.py
 WORKDIR /opt
