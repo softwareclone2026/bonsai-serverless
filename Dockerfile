@@ -1,6 +1,23 @@
 # Prism ML fork の llama.cpp (CUDA) を組み込み、RunPod Serverless のワーカーにする。
-# モデル本体はネットワークボリューム (/runpod-volume/models) に置き、初回だけ
-# Hugging Face から取得して以降はそこから読み込む。
+#
+# モデルをどこから拾うかは環境変数だけで切り替えられる (handler.py の docstring 参照):
+#   ボリュームを付ける   : /runpod-volume/models をマスターに使う (DC に固定される)
+#   ボリュームを付けない : S3 互換 API からコンテナディスクへ落とす (DC を選べる)
+#   どちらも無い         : Hugging Face から落とす (コールドスタートのたびに取得)
+#
+# OrcaBonsai (公開の重みはそのまま、振る舞いだけ実行時に変える rank-1 LoRA) を
+# 使うときの env。Pod で試した組み合わせをそのまま Serverless に持ち込める:
+#   MODEL_REPO=prism-ml/Ternary-Bonsai-2-27B-gguf
+#   MODEL_FILE=Ternary-Bonsai-2-27B-PTQ1_0.gguf   (PTQ1_0 が LoRA の実測済み)
+#   LORA_FILE=bonsai-abliterate-lora.gguf         (9.7MB。空なら LoRA 無し)
+#   LORA_SCALE=1                                  (2 で頑固なプロンプトも折る)
+#   LLAMA_EXTRA_ARGS=--jinja --temp 0.7
+# ベースと LoRA は 1 回そろえれば S3 かボリュームに退避され、次回から速い。
+# 同じ取得手順は tools/orcarouter_setup.py にまとめてある (Pod でも使う)。
+#
+# S3 の読み書きは boto3 に任せる。6.7GB 級の GGUF は単発 PUT の 5GiB を超えるので
+# multipart が要り、boto3 の download_file / upload_file がそれを面倒を見る。
+# aws CLI を入れるより軽いので、こちらを使う。
 #
 # llama.cpp は自前ビルドせず、Prism フォークの公式リリースバイナリを使う。
 # 自前ビルドは 7 アーキテクチャ分を nvcc で焼くため 80 分以上かかり、しかも
@@ -41,7 +58,8 @@ RUN apt-get update \
 
 COPY --from=fetch /opt/llama/ /opt/llama/
 
-RUN pip3 install --no-cache-dir runpod huggingface_hub hf_transfer hf_xet
+# boto3 は S3 互換 API 用 (multipart の download / upload)。
+RUN pip3 install --no-cache-dir runpod huggingface_hub hf_transfer hf_xet boto3
 
 COPY handler.py /opt/handler.py
 WORKDIR /opt

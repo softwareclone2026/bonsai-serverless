@@ -15,17 +15,12 @@ jobs:
     permissions:
       contents: read
       packages: write
-    # リポジトリ secrets に DOCKERHUB_USERNAME と DOCKERHUB_TOKEN の両方が
-    # 入っているときだけ Docker Hub にも push する (未設定なら GHCR のみ)。
-    env:
-      DOCKERHUB_ENABLED: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
-      DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # CUDA イメージ + ビルド成果物で 30GB 近く使うため先に空ける。
+      # CUDA devel イメージ + ビルド成果物で 30GB 近く使うため先に空ける。
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet \
@@ -52,13 +47,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub
-        if: env.DOCKERHUB_ENABLED == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ env.DOCKERHUB_USER }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Compute image tags
         id: tags
         run: |
@@ -68,10 +56,6 @@ jobs:
             echo "value<<__TAGS__"
             echo "ghcr.io/$OWNER_LC/bonsai-serverless:latest"
             echo "ghcr.io/$OWNER_LC/bonsai-serverless:$SHORT_SHA"
-            if [ "$DOCKERHUB_ENABLED" = "true" ]; then
-              echo "docker.io/$DOCKERHUB_USER/bonsai-serverless:latest"
-              echo "docker.io/$DOCKERHUB_USER/bonsai-serverless:$SHORT_SHA"
-            fi
             echo "__TAGS__"
           } >> "$GITHUB_OUTPUT"
 
