@@ -406,6 +406,13 @@ def master_report() -> dict:
             "size": size,
             "note": note,
         },
+        "download": {
+            "backend": DOWNLOAD_BACKEND,
+            "aria2c": bool(shutil.which("aria2c")),
+            "connections": DOWNLOAD_CONNECTIONS,
+            "revision": MODEL_REVISION,
+            "url": model_url() if not MODEL_URL else MODEL_URL,
+        },
         "lora": lora_report(),
     }
 
