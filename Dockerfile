@@ -53,13 +53,23 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 python3-pip libgomp1 ca-certificates aria2 \
+      python3 python3-pip libgomp1 ca-certificates curl aria2 \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fetch /opt/llama/ /opt/llama/
 
 # boto3 は S3 互換 API 用 (multipart の download / upload)。
 RUN pip3 install --no-cache-dir runpod huggingface_hub hf_transfer hf_xet boto3
+
+# rclone は Wasabi (crypt の暗号化リモート) からのモデル取得に使う。
+# apt 版は古いことがあるので公式の current バイナリを入れる。zip は python3 の
+# zipfile で展開する (unzip を増やさない)。handler.py 側にも、イメージに無い
+# 場合の取得フォールバックがある。
+RUN curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip \
+ && python3 -m zipfile -e /tmp/rclone.zip /tmp/ \
+ && cp /tmp/rclone-*/rclone /usr/local/bin/rclone \
+ && chmod 0755 /usr/local/bin/rclone \
+ && rm -rf /tmp/rclone.zip /tmp/rclone-*
 
 COPY handler.py /opt/handler.py
 WORKDIR /opt
